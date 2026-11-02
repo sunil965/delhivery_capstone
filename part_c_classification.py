@@ -3,155 +3,290 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.pipeline import Pipeline
+
 from src.shipment_prep import FEATURES, NOISE_COLUMNS
 
+
+def get_clf_metrics(y_true, y_pred):
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    tn, fp, fn, tp = int(cm[0, 0]), int(cm[0, 1]), int(cm[1, 0]), int(cm[1, 1])
+    acc = round(float(accuracy_score(y_true, y_pred)), 4)
+    prec = round(float(precision_score(y_true, y_pred, zero_division=0)), 4)
+    rec = round(float(recall_score(y_true, y_pred, zero_division=0)), 4)
+    f1 = round(float(f1_score(y_true, y_pred, zero_division=0)), 4)
+    return tn, fp, fn, tp, acc, prec, rec, f1
+
+
 def run_part_c():
+    os.makedirs("outputs", exist_ok=True)
+
     df = pd.read_csv("data/modelling_table.csv")
     X = df[FEATURES]
     y = df["is_delayed"]
 
-    # Task 1: Stratified partitions keeping class representation balanced
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp)
+    # 1. Stratified split: 70 / 15 / 15 -> 840 / 180 / 180
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
+    )
 
-    # Task 2: Standard baseline setups
-    model_rows = []
-    # Blind Baseline
-    blind_preds = np.zeros(shape=y_val.shape)
-    tn, fp, fn, tp = confusion_matrix(y_val, blind_preds).ravel()
-    model_rows.append(["blind_all_on_time", tn, fp, fn, tp, round(accuracy_score(y_val, blind_preds), 4), 0.0, 0.0, 0.0])
+    print(f"Split sizes: train={len(X_train)} (delayed={y_train.sum()}), "
+          f"val={len(X_val)} (delayed={y_val.sum()}), test={len(X_test)} (delayed={y_test.sum()})")
 
-    # Logistic Pipeline
+    # 2. Blind baseline and three classifiers
+    # (a) blind_all_on_time
+    blind_pred = np.zeros(len(y_val), dtype=int)
+    tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_val, blind_pred)
+    models_rows = [{
+        "model": "blind_all_on_time",
+        "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+        "accuracy": acc, "precision": 0.0, "recall": rec, "f1": f1
+    }]
+
+    # (b) logistic_regression
     lr_pipe = Pipeline([("scaler", StandardScaler()), ("model", LogisticRegression(random_state=42))])
     lr_pipe.fit(X_train, y_train)
-    lr_preds = lr_pipe.predict(X_val)
-    tn, fp, fn, tp = confusion_matrix(y_val, lr_preds).ravel()
-    model_rows.append(["logistic_regression", tn, fp, fn, tp, round(accuracy_score(y_val, lr_preds), 4), round(precision_score(y_val, lr_preds), 4), round(recall_score(y_val, lr_preds), 4), round(f1_score(y_val, lr_preds), 4)])
+    lr_pred = lr_pipe.predict(X_val)
+    tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_val, lr_pred)
+    models_rows.append({
+        "model": "logistic_regression",
+        "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+        "accuracy": acc, "precision": prec, "recall": rec, "f1": f1
+    })
 
-    # Tune Tree structural validation limits
-    best_dt_d, best_dt_f1 = None, -1
-    for d in:
+    # (c) decision_tree_depth_<d> with d in [2, 3, 4, 5, 6, 8, 10]
+    dt_candidates = [2, 3, 4, 5, 6, 8, 10]
+    best_dt_f1 = -1.0
+    best_dt_d = None
+    best_dt_pred = None
+
+    for d in dt_candidates:
         dt = DecisionTreeClassifier(criterion="gini", max_depth=d, random_state=42)
         dt.fit(X_train, y_train)
-        score = f1_score(y_val, dt.predict(X_val))
-        if score > best_dt_f1:
-            best_dt_f1, best_dt_d = score, d
+        pred = dt.predict(X_val)
+        val_f1 = f1_score(y_val, pred, zero_division=0)
+        if val_f1 > best_dt_f1:
+            best_dt_f1 = val_f1
+            best_dt_d = d
+            best_dt_pred = pred
 
-    dt_best = DecisionTreeClassifier(criterion="gini", max_depth=best_dt_d, random_state=42)
-    dt_best.fit(X_train, y_train)
-    dt_preds = dt_best.predict(X_val)
-    tn, fp, fn, tp = confusion_matrix(y_val, dt_preds).ravel()
-    model_rows.append([f"decision_tree_depth_{best_dt_d}", tn, fp, fn, tp, round(accuracy_score(y_val, dt_preds), 4), round(precision_score(y_val, dt_preds), 4), round(recall_score(y_val, dt_preds), 4), round(f1_score(y_val, dt_preds), 4)])
+    tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_val, best_dt_pred)
+    models_rows.append({
+        "model": f"decision_tree_depth_{best_dt_d}",
+        "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+        "accuracy": acc, "precision": prec, "recall": rec, "f1": f1
+    })
 
-    # Untuned Default Forest Baseline
+    # (d) random_forest_default
     rf_def = RandomForestClassifier(n_estimators=100, random_state=42)
     rf_def.fit(X_train, y_train)
-    rf_preds = rf_def.predict(X_val)
-    tn, fp, fn, tp = confusion_matrix(y_val, rf_preds).ravel()
-    model_rows.append(["random_forest_default", tn, fp, fn, tp, round(accuracy_score(y_val, rf_preds), 4), round(precision_score(y_val, rf_preds), 4), round(recall_score(y_val, rf_preds), 4), round(f1_score(y_val, rf_preds), 4)])
-    pd.DataFrame(model_rows, columns=["model", "TN", "FP", "FN", "TP", "accuracy", "precision", "recall", "f1"]).to_csv("outputs/part_c_models.csv", index=False)
-
-    # Task 3: Signal Ranking & SelectKBest Filtering extraction
-    selector_all = SelectKBest(f_classif, k="all").fit(X_train, y_train)
-    f_scores = selector_all.scores_
-    f_ranks = pd.Series(f_scores).rank(ascending=False, method='min').astype(int).values
-    rf_imp = rf_def.feature_importances_
-
-    feat_scores = pd.DataFrame({
-        "feature": FEATURES,
-        "f_score": np.round(f_scores, 4),
-        "f_rank": f_ranks,
-        "rf_importance": np.round(rf_imp, 4),
-        "is_noise": [f in NOISE_COLUMNS for f in FEATURES]
+    rf_pred = rf_def.predict(X_val)
+    tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_val, rf_pred)
+    models_rows.append({
+        "model": "random_forest_default",
+        "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+        "accuracy": acc, "precision": prec, "recall": rec, "f1": f1
     })
-    feat_scores.to_csv("outputs/part_c_feature_scores.csv", index=False)
 
-    # Evaluate Validation K-signal curves
-    k_curves = []
-    for k_val in:
-        k_pipe = Pipeline([("selector", SelectKBest(f_classif, k=k_val)), ("model", RandomForestClassifier(n_estimators=100, random_state=42))])
-        k_pipe.fit(X_train, y_train)
-        k_curves.append([k_val, round(f1_score(y_val, k_pipe.predict(X_val)), 4)])
-    pd.DataFrame(k_curves, columns=["k", "val_f1"]).to_csv("outputs/part_c_selectk.csv", index=False)
+    pd.DataFrame(models_rows).to_csv("outputs/part_c_models.csv", index=False)
+    print("outputs/part_c_models.csv written.")
 
-    # Task 4: Hyperparameter grid space exploration (Targeting K=7 features)
-    X_tr_7 = SelectKBest(f_classif, k=7).fit_transform(X_train, y_train)
-    X_va_7 = SelectKBest(f_classif, k=7).fit(X_train, y_train).transform(X_val)
+    # 3. Feature signals and SelectKBest
+    rf_feat = RandomForestClassifier(n_estimators=100, random_state=42)
+    rf_feat.fit(X_train, y_train)
+    rf_importances = rf_feat.feature_importances_
+
+    selector_all = SelectKBest(f_classif, k="all")
+    selector_all.fit(X_train, y_train)
+    f_scores = selector_all.scores_
+
+    feat_df = pd.DataFrame({
+        "feature": FEATURES,
+        "f_score": f_scores,
+        "rf_importance": rf_importances,
+        "is_noise": [f in NOISE_COLUMNS for f in FEATURES],
+    })
+    feat_df["f_rank"] = feat_df["f_score"].rank(ascending=False, method="min").astype(int)
+    # Arrange columns: feature, f_score, f_rank, rf_importance, is_noise
+    feat_df = feat_df[["feature", "f_score", "f_rank", "rf_importance", "is_noise"]]
+    feat_df["f_score"] = feat_df["f_score"].round(4)
+    feat_df["rf_importance"] = feat_df["rf_importance"].round(4)
+    feat_df.to_csv("outputs/part_c_feature_scores.csv", index=False)
+    print("outputs/part_c_feature_scores.csv written.")
+
+    # k experiment for k in [5, 7, 10, 12, 17]
+    selectk_rows = []
+    for k in [5, 7, 10, 12, 17]:
+        pipe = Pipeline([
+            ("selector", SelectKBest(f_classif, k=k)),
+            ("model", RandomForestClassifier(n_estimators=100, random_state=42))
+        ])
+        pipe.fit(X_train, y_train)
+        pred = pipe.predict(X_val)
+        val_f1 = round(float(f1_score(y_val, pred, zero_division=0)), 4)
+        selectk_rows.append({"k": k, "val_f1": val_f1})
+    pd.DataFrame(selectk_rows).to_csv("outputs/part_c_selectk.csv", index=False)
+    print("outputs/part_c_selectk.csv written.")
+
+    # 4. Tuning with k=7
+    selector_k7 = SelectKBest(f_classif, k=7)
+    X_train_k7 = selector_k7.fit_transform(X_train, y_train)
+    X_val_k7 = selector_k7.transform(X_val)
 
     param_grid = {
-        "n_estimators":,
-        "max_depth":,
-        "min_samples_leaf": [1, 5, 10]
+        "n_estimators": [50, 100, 150],
+        "max_depth": [4, 6, 8],
+        "min_samples_leaf": [1, 5, 10],
     }
 
-    gs = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=5).fit(X_tr_7, y_train)
-    rs = RandomizedSearchCV(RandomForestClassifier(random_state=42), param_grid, n_iter=9, cv=5, random_state=42).fit(X_tr_7, y_train)
+    # Grid search (candidates=27, cv=5 -> 135 fits)
+    grid = GridSearchCV(
+        RandomForestClassifier(random_state=42),
+        param_grid,
+        cv=5,
+    )
+    grid.fit(X_train_k7, y_train)
+    grid_val_pred = grid.predict(X_val_k7)
+    grid_val_f1 = round(float(f1_score(y_val, grid_val_pred, zero_division=0)), 4)
+    grid_best_acc = round(float(grid.best_score_), 4)
 
-    # Default untuned control benchmark on top 7 features
-    rf_7_def = RandomForestClassifier(n_estimators=100, random_state=42).fit(X_tr_7, y_train)
+    # Randomized search (n_iter=9, cv=5 -> 45 fits)
+    rand = RandomizedSearchCV(
+        RandomForestClassifier(random_state=42),
+        param_grid,
+        n_iter=9,
+        cv=5,
+        random_state=42,
+    )
+    rand.fit(X_train_k7, y_train)
+    rand_val_pred = rand.predict(X_val_k7)
+    rand_val_f1 = round(float(f1_score(y_val, rand_val_pred, zero_division=0)), 4)
+    rand_best_acc = round(float(rand.best_score_), 4)
+
+    # Default forest on same 7 features
+    def_rf = RandomForestClassifier(n_estimators=100, random_state=42)
+    def_rf.fit(X_train_k7, y_train)
+    def_val_pred = def_rf.predict(X_val_k7)
+    def_val_f1 = round(float(f1_score(y_val, def_val_pred, zero_division=0)), 4)
 
     tuning_rows = [
-        ["grid_search", 27, 5, 135, str(gs.best_params_).replace("'", '"'), round(gs.best_score_, 4), round(f1_score(y_val, gs.predict(X_va_7)), 4)],
-        ["randomized_search", 9, 5, 45, str(rs.best_params_).replace("'", '"'), round(rs.best_score_, 4), round(f1_score(y_val, rs.predict(X_va_7)), 4)],
-        ["default_forest_same_7_features", 1, 0, 1, "defaults", "", round(f1_score(y_val, rf_7_def.predict(X_va_7)), 4)]
+        {
+            "search": "grid_search",
+            "candidates": 27,
+            "cv_folds": 5,
+            "total_fits": 135,
+            "best_params": str(grid.best_params_),
+            "best_cv_accuracy": grid_best_acc,
+            "val_f1": grid_val_f1,
+        },
+        {
+            "search": "randomized_search",
+            "candidates": 9,
+            "cv_folds": 5,
+            "total_fits": 45,
+            "best_params": str(rand.best_params_),
+            "best_cv_accuracy": rand_best_acc,
+            "val_f1": rand_val_f1,
+        },
+        {
+            "search": "default_forest_same_7_features",
+            "candidates": 1,
+            "cv_folds": 0,
+            "total_fits": 1,
+            "best_params": "defaults",
+            "best_cv_accuracy": "",
+            "val_f1": def_val_f1,
+        },
     ]
-    pd.DataFrame(tuning_rows, columns=["search", "candidates", "cv_folds", "total_fits", "best_params", "best_cv_accuracy", "val_f1"]).to_csv("outputs/part_c_tuning.csv", index=False)
+    pd.DataFrame(tuning_rows).to_csv("outputs/part_c_tuning.csv", index=False)
+    print("outputs/part_c_tuning.csv written.")
 
-    # Task 5: Select final optimal parameters mapping tied entries safely
-    f1_scores = [tuning_rows[2][6], tuning_rows[0][6], tuning_rows[1][6]]
-    winning_idx = int(np.argmax(f1_scores))
-    winners = ["default_forest_same_7_features", "grid_search", "randomized_search"]
-    final_source = winners[winning_idx]
+    # 5. Choosing the final configuration
+    # Ties: default_forest_same_7_features, then grid_search, then randomized_search
+    priority = {"default_forest_same_7_features": 3, "grid_search": 2, "randomized_search": 1}
+    candidates_eval = [
+        ("grid_search", grid_val_f1, grid.best_params_),
+        ("randomized_search", rand_val_f1, rand.best_params_),
+        ("default_forest_same_7_features", def_val_f1, {}),
+    ]
+    # Sort descending by val_f1, then priority
+    candidates_eval.sort(key=lambda x: (x[1], priority[x[0]]), reverse=True)
+    winner_name, winner_f1, winner_params = candidates_eval[0]
+    print(f"Final model chosen: {winner_name} with val_f1={winner_f1} and params={winner_params}")
 
-    if final_source == "grid_search":
-        params = gs.best_params_
-    elif final_source == "randomized_search":
-        params = rs.best_params_
+    # Build final Pipeline fitted on training rows
+    if winner_name == "default_forest_same_7_features":
+        final_clf = RandomForestClassifier(n_estimators=100, random_state=42)
+        n_est = 100
+        max_d = "unlimited"
+        min_leaf = 1
     else:
-        params = {}
+        final_clf = RandomForestClassifier(random_state=42, **winner_params)
+        n_est = winner_params.get("n_estimators", 100)
+        max_d = winner_params.get("max_depth", "unlimited")
+        min_leaf = winner_params.get("min_samples_leaf", 1)
 
-    final_pipe = Pipeline([
+    final_pipeline = Pipeline([
         ("selector", SelectKBest(f_classif, k=7)),
-        ("model", RandomForestClassifier(random_state=42, **params))
-    ]).fit(X_train, y_train)
+        ("model", final_clf),
+    ])
+    final_pipeline.fit(X_train, y_train)
 
-    # Task 6: Risk Threshold calibrations
-    val_probs = final_pipe.predict_proba(X_val)[:, 1]
+    # 6. Alert threshold
+    # Predict positive class probabilities on validation rows
+    val_probs = final_pipeline.predict_proba(X_val)[:, 1]
     thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     thresh_records = []
-    chosen_t = 0.1
+    chosen_threshold = 0.1
 
     for t in thresholds:
-        t_preds = (val_probs >= t).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_val, t_preds).ravel()
-        rec = recall_score(y_val, t_preds)
-        thresh_records.append([t, tn, fp, fn, tp, round(accuracy_score(y_val, t_preds), 4), round(precision_score(y_val, t_preds, zero_division=0), 4), round(rec, 4), round(f1_score(y_val, t_preds, zero_division=0), 4)])
-
+        pred_t = (val_probs >= t).astype(int)
+        tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_val, pred_t)
+        thresh_records.append({
+            "threshold": t,
+            "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+            "accuracy": acc, "precision": prec, "recall": rec, "f1": f1
+        })
+        # Operations rule: highest t whose validation recall >= 0.80
         if rec >= 0.80:
-            chosen_t = max(chosen_t, t)
+            if t > chosen_threshold:
+                chosen_threshold = t
 
-    pd.DataFrame(thresh_records, columns=["threshold", "TN", "FP", "FN", "TP", "accuracy", "precision", "recall", "f1"]).to_csv("outputs/part_c_thresholds.csv", index=False)
+    pd.DataFrame(thresh_records).to_csv("outputs/part_c_thresholds.csv", index=False)
+    print(f"outputs/part_c_thresholds.csv written. Chosen threshold: {chosen_threshold}")
 
-    # Task 7: Evaluate general performance limits against test partitions
-    t_preds_test = (final_pipe.predict_proba(X_test)[:, 1] >= chosen_t).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_test, t_preds_test).ravel()
-    pd.DataFrame([[chosen_t, tn, fp, fn, tp, round(accuracy_score(y_test, t_preds_test), 4), round(precision_score(y_test, t_preds_test), 4), round(recall_score(y_test, t_preds_test), 4), round(f1_score(y_test, t_preds_test), 4)]],
-                 columns=["threshold", "TN", "FP", "FN", "TP", "accuracy", "precision", "recall", "f1"]).to_csv("outputs/part_c_final_test.csv", index=False)
+    # 7. One test evaluation
+    test_probs = final_pipeline.predict_proba(X_test)[:, 1]
+    test_pred_thresh = (test_probs >= chosen_threshold).astype(int)
+    tn, fp, fn, tp, acc, prec, rec, f1 = get_clf_metrics(y_test, test_pred_thresh)
+    final_test_row = [{
+        "threshold": chosen_threshold,
+        "TN": tn, "FP": fp, "FN": fn, "TP": tp,
+        "accuracy": acc, "precision": prec, "recall": rec, "f1": f1
+    }]
+    pd.DataFrame(final_test_row).to_csv("outputs/part_c_final_test.csv", index=False)
+    print("outputs/part_c_final_test.csv written.")
 
-    pd.DataFrame([{
+    # outputs/part_c_final_config.csv
+    final_config_row = [{
         "selector_k": 7,
-        "n_estimators": params.get("n_estimators", 100),
-        "max_depth": params.get("max_depth", "unlimited"),
-        "min_samples_leaf": params.get("min_samples_leaf", 1),
-        "threshold": chosen_t,
-        "chosen_from": final_source
-    }]).to_csv("outputs/part_c_final_config.csv", index=False)
+        "n_estimators": n_est,
+        "max_depth": max_d,
+        "min_samples_leaf": min_leaf,
+        "threshold": chosen_threshold,
+        "chosen_from": winner_name,
+    }]
+    pd.DataFrame(final_config_row).to_csv("outputs/part_c_final_config.csv", index=False)
+    print("outputs/part_c_final_config.csv written.")
+
 
 if __name__ == "__main__":
     run_part_c()
